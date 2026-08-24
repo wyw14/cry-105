@@ -42,25 +42,25 @@ func NewTimeline(paths store.Paths, trail *audit.Trail) (*Timeline, error) {
 	return timeline, nil
 }
 
+// Reserve publishes a reservation under a single lock hold so that the
+// conflict check and the interval publication adjudicate against the same
+// resource state. Releasing the lock between the check and the publish would
+// let a concurrent Extend or Reserve slip a conflicting interval in, producing
+// overlapping antenna ownership for an active pass and its successor.
 func (t *Timeline) Reserve(passID, antennaID string, start, end time.Time) (Interval, error) {
 	t.mu.Lock()
+	defer t.mu.Unlock()
 	t.nextGen[antennaID]++
 	value := Interval{
 		ReservationID: uuid.NewString(), PassID: passID, AntennaID: antennaID,
 		Start: start, End: end, Generation: t.nextGen[antennaID], Status: Reserved,
 	}
 	if err := value.Validate(); err != nil {
-		t.mu.Unlock()
 		return Interval{}, err
 	}
 	if conflict := t.conflictLocked(value, ""); conflict != nil {
-		t.mu.Unlock()
 		return Interval{}, conflict
 	}
-	t.mu.Unlock()
-	time.Sleep(75 * time.Millisecond)
-	t.mu.Lock()
-	defer t.mu.Unlock()
 	t.byAntenna[antennaID] = append(t.byAntenna[antennaID], value)
 	if err := t.flushLocked(); err != nil {
 		t.byAntenna[antennaID] = t.byAntenna[antennaID][:len(t.byAntenna[antennaID])-1]
@@ -70,31 +70,29 @@ func (t *Timeline) Reserve(passID, antennaID string, start, end time.Time) (Inte
 	return value, nil
 }
 
+// Extend lengthens a reservation under a single lock hold so that the
+// conflict check sees the same resource state the publication mutates. A
+// concurrent Reserve must observe the extended end before it can publish a
+// successor interval, which is what prevents an active pass and its successor
+// from claiming overlapping ownership of one antenna.
 func (t *Timeline) Extend(reservationID string, newEnd time.Time) (Interval, error) {
 	t.mu.Lock()
+	defer t.mu.Unlock()
 	antennaID, index, current, found := t.findLocked(reservationID)
 	if !found {
-		t.mu.Unlock()
 		return Interval{}, fmt.Errorf("reservation %s not found", reservationID)
 	}
 	if current.Status == Released {
-		t.mu.Unlock()
 		return Interval{}, fmt.Errorf("reservation %s is already released", reservationID)
 	}
 	updated := current
 	updated.End = newEnd
 	if err := updated.Validate(); err != nil {
-		t.mu.Unlock()
 		return Interval{}, err
 	}
 	if conflict := t.conflictLocked(updated, reservationID); conflict != nil {
-		t.mu.Unlock()
 		return Interval{}, conflict
 	}
-	t.mu.Unlock()
-	time.Sleep(75 * time.Millisecond)
-	t.mu.Lock()
-	defer t.mu.Unlock()
 	t.byAntenna[antennaID][index] = updated
 	if err := t.flushLocked(); err != nil {
 		t.byAntenna[antennaID][index] = current
