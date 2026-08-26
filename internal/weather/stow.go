@@ -38,11 +38,8 @@ func (c *Coordinator) Handle(ctx context.Context, sample WindSample, passID, ant
 	if sample.GustMetersPerSecond < c.threshold {
 		return result, nil
 	}
-	if err := c.antenna.Stow(antennaID, result.OperationID, true); err != nil {
-		result.Error = err.Error()
-		return result, err
-	}
-	result.Stowed = true
+	// 强风处置必须先静默发射链：确认 RF 已禁止发射后，才允许天线离开跟踪路径。
+	// 若在功放仍 enabled 时即驱动收拢，波束会在移动中扫出许可区域。
 	proof, err := c.rf.Inhibit(ctx, chainID, result.OperationID)
 	if err != nil {
 		result.Error = err.Error()
@@ -52,8 +49,15 @@ func (c *Coordinator) Handle(ctx context.Context, sample WindSample, passID, ant
 	result.InhibitConfirmed = proof.Confirmed && c.rf.VerifyInhibit(chainID, result.OperationID)
 	if !result.InhibitConfirmed {
 		result.Error = "RF inhibit proof does not match operation"
+		_, _ = c.audit.Record(audit.Event{Component: "weather", Action: "stow.inhibit-failed", Subject: antennaID, Severity: audit.Critical, Operation: result.OperationID, Fields: map[string]any{"error": result.Error}})
 		return result, fmt.Errorf("%s", result.Error)
 	}
+	// RF 已确认禁止发射，此时安全允许天线离开跟踪路径进入收拢。
+	if err := c.antenna.Stow(antennaID, result.OperationID, result.InhibitConfirmed); err != nil {
+		result.Error = err.Error()
+		return result, err
+	}
+	result.Stowed = true
 	if passID != "" {
 		if err := c.passes.Fail(passID, "high wind safety stow"); err != nil {
 			return result, err
