@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>OrbitLink | {{.Title}}</title>
+  <link rel="stylesheet" href="/assets/web/orbitlink.css">
+</head>
+<body data-view="{{.View}}" data-endpoint="{{.Endpoint}}">
+  <header class="topbar">
+    <a class="brand" href="/passes"><span class="mark">OL</span><span>OrbitLink</span></a>
+    <nav aria-label="Operations">
+      <a href="/passes">Passes</a><a href="/antennas">Antennas</a>
+      <a href="/rf-chains">RF chains</a><a href="/recordings">Recordings</a>
+    </nav>
+    <div class="health"><span id="health-dot"></span><span id="health-text">Connecting</span></div>
+  </header>
+  <main>
+    <section class="heading">
+      <div><p class="eyebrow">GROUND STATION CONTROL</p><h1>{{.Title}}</h1><p>{{.Subtitle}}</p></div>
+      <button id="primary-action" type="button">{{.ActionLabel}}</button>
+    </section>
+    <section class="metrics" aria-label="Station summary">
+      <div><span>UTC station time</span><strong id="metric-time">--:--:--</strong></div>
+      <div><span>Active passes</span><strong id="metric-passes">0</strong></div>
+      <div><span>Available antennas</span><strong id="metric-antennas">0</strong></div>
+      <div><span>Open recordings</span><strong id="metric-recordings">0</strong></div>
+    </section>
+    <section class="workspace">
+      <aside><h2>Live state</h2><p id="view-description">Loading station state.</p><div id="filters"></div></aside>
+      <div class="data-panel"><div class="panel-head"><h2 id="panel-title">Operational feed</h2><span id="last-update">Waiting</span></div><div id="data-grid" class="data-grid" aria-live="polite"></div></div>
+    </section>
+  </main>
+  <dialog id="action-dialog"><form method="dialog"><div class="dialog-head"><h2 id="dialog-title">Operation</h2><button value="cancel" aria-label="Close">x</button></div><div id="dialog-fields"></div><p id="dialog-error" role="alert"></p><menu><button value="cancel">Cancel</button><button id="dialog-submit" value="default">Submit</button></menu></form></dialog>
+  <script src="/assets/web/orbitlink.js"></script>
+</body>
+</html>
