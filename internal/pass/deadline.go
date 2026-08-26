@@ -60,7 +60,12 @@ func (m *DeadlineManager) ApplyCorrection(correction stationclock.Correction) {
 	defer m.mu.Unlock()
 	for id, deadline := range m.deadlines {
 		if deadline.Phase == Tracking || deadline.Phase == Draining {
-			deadline.MonotonicLOS = deadline.MonotonicLOS.Add(-correction.Delta)
+			// The pass is already active, so its reception window was fixed
+			// when Activate ran: the monotonic deadline is immutable and the
+			// civil LOS stays aligned with the forecast. A wall-clock
+			// correction must not shorten (or extend) the remaining duration,
+			// so the pass keeps its start-of-pass timing until it completes.
+			continue
 		}
 		deadline.CivilLOS = deadline.CivilLOS.Add(correction.Delta)
 		m.deadlines[id] = deadline
