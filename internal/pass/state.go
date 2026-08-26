@@ -109,52 +109,81 @@ func (s *Service) ApplyAcquisitionResult(result receiver.AcquisitionResult) erro
 		_, _ = s.audit.Record(audit.Event{Component: "pass", Action: "stale-acquisition.ignored", Subject: result.PassID, Severity: audit.Warning, Fields: map[string]any{"attempt_id": result.AttemptID, "current_attempt": value.CurrentAttemptID}})
 		return nil
 	}
-	if result.Locked && result.Synced {
-		value.Phase = Tracking
-		value.DecoderEpoch = result.Epoch
-	} else {
-		value.Phase = Failed
-		value.FailureReason = result.ErrorCode
+	// A single receiver result must never publish tracking or start the
+	// recorder. Diversity reception requires every required receiver chain to
+	// be locked and synced before tracking is published (see AcceptDiversity).
+	// Individual results merely accumulate; the pass stays Acquiring until
+	// diversity converges or is explicitly failed.
+	if value.Phase == Acquiring {
+		if result.Locked && result.Synced {
+			value.DecoderEpoch = result.Epoch
+		} else if value.FailureReason == "" {
+			value.FailureReason = result.ErrorCode
+		}
 	}
 	value.UpdatedAt = time.Now().UTC()
 	s.passes[value.ID] = value
 	err := s.flushLocked()
 	s.mu.Unlock()
-	if err != nil {
-		return err
-	}
-	if value.Phase == Failed {
-		return s.recorder.StopForFailure(value.ID, result.AttemptID, result.ErrorCode)
-	}
-	return nil
+	return err
 }
 
 func (s *Service) AcceptDiversity(passID string, results []receiver.AcquisitionResult) (receiver.DiversityDecision, error) {
-	s.mu.RLock()
+	s.mu.Lock()
 	value, found := s.passes[passID]
-	s.mu.RUnlock()
 	if !found {
+		s.mu.Unlock()
 		return receiver.DiversityDecision{}, fmt.Errorf("pass %s not found", passID)
 	}
 	decision, err := (receiver.DiversityPolicy{RequiredChains: value.RequiredReceiverChains}).Evaluate(results)
 	if err != nil {
+		s.mu.Unlock()
 		return decision, err
 	}
 	if !decision.Ready {
+		s.mu.Unlock()
 		return decision, nil
 	}
-	if err := s.update(passID, func(current *Pass) error {
-		if current.Phase != Acquiring {
-			return fmt.Errorf("pass cannot enter tracking from %s", current.Phase)
-		}
-		current.Phase = Tracking
-		current.DecoderEpoch = decision.Epoch
-		return nil
-	}); err != nil {
+	// Tracking and recorder startup must converge together: until every
+	// required receiver chain is locked and synced, neither may publish. The
+	// recorder is started only after the pass reaches Tracking so that no
+	// frames are ever recorded against an unsynchronized diversity set.
+	if value.Phase == Tracking && value.RecordingSegmentID != "" {
+		// Already converged for this pass; keep the existing segment.
+		s.mu.Unlock()
+		return decision, nil
+	}
+	if value.Phase != Acquiring {
+		s.mu.Unlock()
+		return decision, fmt.Errorf("pass cannot enter tracking from %s", value.Phase)
+	}
+	value.Phase = Tracking
+	value.DecoderEpoch = decision.Epoch
+	value.FailureReason = ""
+	value.UpdatedAt = time.Now().UTC()
+	s.passes[passID] = value
+	if err := s.flushLocked(); err != nil {
+		// Roll back the phase so a later attempt can retry convergence.
+		value.Phase = Acquiring
+		s.passes[passID] = value
+		s.mu.Unlock()
 		return decision, err
 	}
-	segment, err := s.recorder.Start(passID, value.OwnerStation, value.OwnerGeneration)
+	ownerStation := value.OwnerStation
+	ownerGeneration := value.OwnerGeneration
+	s.mu.Unlock()
+
+	segment, err := s.recorder.Start(passID, ownerStation, ownerGeneration)
 	if err != nil {
+		// Recorder could not start; undo tracking publication so the pass does
+		// not linger in Tracking without an active recorder.
+		_ = s.update(passID, func(current *Pass) error {
+			if current.Phase == Tracking && current.RecordingSegmentID == "" {
+				current.Phase = Acquiring
+				current.DecoderEpoch = 0
+			}
+			return nil
+		})
 		return decision, err
 	}
 	if err := s.update(passID, func(current *Pass) error {
@@ -163,6 +192,7 @@ func (s *Service) AcceptDiversity(passID string, results []receiver.AcquisitionR
 	}); err != nil {
 		return decision, err
 	}
+	_, _ = s.audit.Record(audit.Event{Component: "pass", Action: "diversity.converged", Subject: passID, Fields: map[string]any{"epoch": decision.Epoch, "chains": decision.Chains, "segment_id": segment.ID}})
 	return decision, nil
 }
 
